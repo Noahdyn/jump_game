@@ -17,13 +17,16 @@ GRAVITY :: 1800
 MOVE_SPEED :: 240
 JUMP_SPEED :: -960
 
-JUMP_STRETCH_FACTOR :: 0.3
+JUMP_STRETCH_FACTOR :: 0.45
 JUMP_STRETCH_ANIM_DURATION :: .2
 STRETCH_SMOOTHING :: 20
 
-SQUASH_SMOOTHING :: 5
-SQUASH_FACTOR :: 0.25
-SQUASH_THRESHHOLD :: 360
+SQUASH_SMOOTHING :: 4
+SQUASH_FACTOR: f32 : 0.55
+SQUASH_THRESHOLD :: 360
+
+JUMP_PARTICLE_STRENGTH :: 0.2
+LANDING_PARTICLE_STRENGTH :: 0.4
 
 MAX_PARTICLES :: 256
 
@@ -50,8 +53,9 @@ Particle :: struct {
 	size:         rl.Vector2,
 	lifetime:     f32,
 	max_lifetime: f32,
-	invert:       bool,
-	dir:          proc(x: f32, pos: rl.Vector2, invert: bool) -> rl.Vector2,
+	dir_x:        f32, // -1 = left, 1 = right
+	curve:        f32, // per-particle random value for velocity fns
+	dir:          proc(x: f32, dir_x: f32, curve: f32) -> rl.Vector2,
 	speed:        f32,
 	active:       bool,
 }
@@ -92,11 +96,6 @@ update_player :: proc(dt: f32) {
 	t := min(dt * (state.player.on_ground ? SQUASH_SMOOTHING : STRETCH_SMOOTHING), 1)
 	state.player.size += (target - state.player.size) * t
 
-	if state.player.on_ground && state.player.vel.y < 4 {
-		strength: f32 = 0.2
-		spawn_jump_particles(strength)
-	}
-
 	state.player.pos += state.player.vel * dt
 
 	state.player.on_ground = state.player.pos.y >= GROUND_LEVEL
@@ -104,83 +103,52 @@ update_player :: proc(dt: f32) {
 	if state.player.on_ground {
 		state.player.pos.y = GROUND_LEVEL
 
-		if state.player.vel.y > SQUASH_THRESHHOLD {
-			spawn_landing_particles(0.2)
-			impact := min(state.player.vel.y / abs(f32(JUMP_SPEED)), 1)
-			squash := impact * SQUASH_FACTOR
+		if state.player.vel.y > SQUASH_THRESHOLD {
+			spawn_particles(LANDING_PARTICLE_STRENGTH, arc_particle_fn)
+			squash := SQUASH_FACTOR
 			state.player.size = {PLAYER_WIDTH * (1 + squash), PLAYER_HEIGHT * (1 - squash)}
 		}
 		state.player.vel.y = 0
 	}
 }
 
-spawn_jump_particles :: proc(strength: f32) {
+spawn_particles :: proc(
+	strength: f32,
+	dir_fn: proc(x: f32, dir_x: f32, curve: f32) -> rl.Vector2,
+) {
+	rb := &state.particle_ring_buffer
 	particle_count := int(4 + 8 * strength)
 	for i in 0 ..< particle_count {
-		dir: f32 = i % 2 == 0 ? -1 : 1
-		speed := rand.float32_range(50, 110) * (0.5 + strength)
+		side: f32 = i % 2 == 0 ? -1 : 1
+		size := rand.float32_range(7, 12) * (0.7 + strength * 0.6)
 
-		rb := &state.particle_ring_buffer
 		p := &rb.particles[rb.next]
-		rb.next = (state.particle_ring_buffer.next + 1) % MAX_PARTICLES
+		rb.next = (rb.next + 1) % MAX_PARTICLES
 
 		p^ = Particle {
 			pos          = {
-				state.player.pos.x +
-				(dir == -1 ? (-state.player.size.x) : state.player.size.x) +
-				rand.float32_range(-6, 6),
-				state.player.pos.y + rand.float32_range(-1, 0),
+				state.player.pos.x + side * state.player.size.x + rand.float32_range(-6, 6),
+				state.player.pos.y - size / 2 + rand.float32_range(-1, 0),
 			},
-			dir          = linear_particle_fn,
-			speed        = speed,
-			invert       = dir == -1,
+			dir          = dir_fn,
+			speed        = rand.float32_range(50, 110) * (0.5 + strength),
+			dir_x        = side,
+			curve        = 6 + f32(rand.int_range(-5, 5)),
 			max_lifetime = rand.float32_range(1.0, 1.75),
-			size         = rand.float32_range(7, 12) * (0.7 + strength * 0.6),
+			size         = size,
 			active       = true,
 		}
 		p.lifetime = p.max_lifetime
 	}
 }
 
-linear_particle_fn :: proc(x: f32, pos: rl.Vector2, invert: bool) -> rl.Vector2 {
-	// outward and up, easing out (replaces the old global drag)
+quad_ease_out_particle_fn :: proc(x: f32, dir_x: f32, curve: f32) -> rl.Vector2 {
 	decay := (1 - x) * (1 - x)
-	return rl.Vector2{invert ? -1 : 1, -1} * decay
+	return rl.Vector2{dir_x, -1} * decay
 }
 
-arc_particle_fn :: proc(x: f32, pos: rl.Vector2, invert: bool) -> rl.Vector2 {
-	// vertical velocity grows linearly (like gravity) -> parabolic path.
-	// height offset ∝ -1.5x + 2x²: peaks at x = 0.375, back at start height
-	// at x = 0.75, then keeps falling below it
-	return {invert ? -1 : 1, -1.5 + 4 * x}
-}
-
-spawn_landing_particles :: proc(strength: f32) {
-	particle_count := int(4 + 8 * strength)
-	for i in 0 ..< particle_count {
-		dir: f32 = i % 2 == 0 ? -1 : 1
-		speed := rand.float32_range(50, 110) * (0.5 + strength)
-
-		rb := &state.particle_ring_buffer
-		p := &rb.particles[rb.next]
-		rb.next = (state.particle_ring_buffer.next + 1) % MAX_PARTICLES
-
-		p^ = Particle {
-			pos          = {
-				state.player.pos.x +
-				(dir == -1 ? (-state.player.size.x) : state.player.size.x) +
-				rand.float32_range(-6, 6),
-				state.player.pos.y + rand.float32_range(-1, 0),
-			},
-			dir          = arc_particle_fn,
-			speed        = speed,
-			invert       = dir == -1,
-			max_lifetime = rand.float32_range(1.0, 1.75),
-			size         = rand.float32_range(7, 12) * (0.7 + strength * 0.6),
-			active       = true,
-		}
-		p.lifetime = p.max_lifetime
-	}
+arc_particle_fn :: proc(x: f32, dir_x: f32, curve: f32) -> rl.Vector2 {
+	return {dir_x, -1.5 + curve * x}
 }
 
 handle_input :: proc() {
@@ -188,6 +156,7 @@ handle_input :: proc() {
 	if (rl.IsKeyDown(rl.KeyboardKey.UP) || rl.IsKeyDown(rl.KeyboardKey.W)) &&
 	   state.player.on_ground {
 		state.player.vel.y = JUMP_SPEED
+		spawn_particles(JUMP_PARTICLE_STRENGTH, quad_ease_out_particle_fn)
 	}
 	if rl.IsKeyDown(rl.KeyboardKey.RIGHT) || rl.IsKeyDown(rl.KeyboardKey.D) do state.player.vel.x += MOVE_SPEED
 	if rl.IsKeyDown(rl.KeyboardKey.LEFT) || rl.IsKeyDown(rl.KeyboardKey.A) do state.player.vel.x -= MOVE_SPEED
@@ -214,9 +183,7 @@ update_particles :: proc(dt: f32) {
 		if p.dir == nil do continue
 
 		x := 1 - p.lifetime / p.max_lifetime
-		// dir returns a velocity multiplier, so the function controls both
-		// direction and pacing (easing, falling faster, ...)
-		vel := p.dir(x, p.pos, p.invert)
+		vel := p.dir(x, p.dir_x, p.curve)
 		p.pos += vel * p.speed * dt
 	}
 }
@@ -230,7 +197,7 @@ draw_particles :: proc() {
 
 		draw_pos := rl.Vector2{p.pos.x - p.size.x / 2, p.pos.y - p.size.y / 2}
 
-		rl.DrawRectangleV(draw_pos, p.size, rl.Color{237, 169, 66, alpha})
+		rl.DrawRectangleV(draw_pos, p.size, rl.Color{237, 169, 200, alpha})
 	}
 }
 
