@@ -14,10 +14,18 @@ GROUND_LEVEL :: GAME_HEIGHT * 0.66
 
 GRAVITY :: 1800
 
-MOVE_SPEED :: 240
-JUMP_SPEED :: -960
+JUMP_CUT_FACTOR :: 0.5
 
-JUMP_STRETCH_FACTOR :: 0.45
+MOVE_SPEED :: 240
+JUMP_SPEED :: -866
+
+
+GROUND_ACCEL :: 2400
+GROUND_FRICTION :: 3000
+AIR_ACCEL :: 1000
+AIR_DRAG :: 0
+
+JUMP_STRETCH_FACTOR :: 0.35
 JUMP_STRETCH_ANIM_DURATION :: .2
 STRETCH_SMOOTHING :: 20
 
@@ -40,6 +48,8 @@ Player :: struct {
 	size:      rl.Vector2,
 	vel:       rl.Vector2,
 	on_ground: bool,
+	air_jumps: u8,
+	input_x:   f32,
 }
 
 
@@ -53,8 +63,8 @@ Particle :: struct {
 	size:         rl.Vector2,
 	lifetime:     f32,
 	max_lifetime: f32,
-	dir_x:        f32, // -1 = left, 1 = right
-	curve:        f32, // per-particle random value for velocity fns
+	dir_x:        f32,
+	curve:        f32,
 	dir:          proc(x: f32, dir_x: f32, curve: f32) -> rl.Vector2,
 	speed:        f32,
 	active:       bool,
@@ -87,29 +97,45 @@ main :: proc() {
 }
 
 update_player :: proc(dt: f32) {
-	state.player.vel.y += GRAVITY * dt
+	p := &state.player
+	p.vel.y += GRAVITY * dt
 
-	speed := min(abs(state.player.vel.y) / abs(f32(JUMP_SPEED)), 1)
+	speed := min(abs(p.vel.y) / abs(f32(JUMP_SPEED)), 1)
 	stretch := speed * JUMP_STRETCH_FACTOR
 
-	target := rl.Vector2{PLAYER_WIDTH * (1 - stretch), PLAYER_HEIGHT * (1 + stretch)}
-	t := min(dt * (state.player.on_ground ? SQUASH_SMOOTHING : STRETCH_SMOOTHING), 1)
-	state.player.size += (target - state.player.size) * t
+	target_size := rl.Vector2{PLAYER_WIDTH * (1 - stretch), PLAYER_HEIGHT * (1 + stretch)}
+	t := min(dt * (p.on_ground ? SQUASH_SMOOTHING : STRETCH_SMOOTHING), 1)
+	p.size += (target_size - p.size) * t
 
-	state.player.pos += state.player.vel * dt
+	target := p.input_x * MOVE_SPEED
+	accel: f32
+	if p.on_ground {
+		accel = p.input_x != 0 ? GROUND_ACCEL : GROUND_FRICTION
+	} else {
+		accel = p.input_x != 0 ? AIR_ACCEL : AIR_DRAG
+	}
+	p.vel.x = move_toward(p.vel.x, target, accel * dt)
 
-	state.player.on_ground = state.player.pos.y >= GROUND_LEVEL
+	p.pos += p.vel * dt
 
-	if state.player.on_ground {
-		state.player.pos.y = GROUND_LEVEL
+	p.on_ground = p.pos.y >= GROUND_LEVEL
 
-		if state.player.vel.y > SQUASH_THRESHOLD {
+	if p.on_ground {
+		p.pos.y = GROUND_LEVEL
+		p.air_jumps = 1
+
+		if p.vel.y > SQUASH_THRESHOLD {
 			spawn_particles(LANDING_PARTICLE_STRENGTH, arc_particle_fn)
 			squash := SQUASH_FACTOR
-			state.player.size = {PLAYER_WIDTH * (1 + squash), PLAYER_HEIGHT * (1 - squash)}
+			p.size = {PLAYER_WIDTH * (1 + squash), PLAYER_HEIGHT * (1 - squash)}
 		}
-		state.player.vel.y = 0
+		p.vel.y = 0
 	}
+}
+
+move_toward :: proc(current, target, max_delta: f32) -> f32 {
+	if abs(target - current) <= max_delta do return target
+	return current + math.sign(target - current) * max_delta
 }
 
 spawn_particles :: proc(
@@ -152,14 +178,24 @@ arc_particle_fn :: proc(x: f32, dir_x: f32, curve: f32) -> rl.Vector2 {
 }
 
 handle_input :: proc() {
-	state.player.vel.x = 0
-	if (rl.IsKeyDown(rl.KeyboardKey.UP) || rl.IsKeyDown(rl.KeyboardKey.W)) &&
-	   state.player.on_ground {
+	state.player.input_x = 0
+	if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) do state.player.input_x += 1
+	if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) do state.player.input_x -= 1
+
+	if (rl.IsKeyPressed(rl.KeyboardKey.UP) || rl.IsKeyPressed(rl.KeyboardKey.W)) &&
+	   (state.player.on_ground || state.player.air_jumps > 0) {
+		if !state.player.on_ground {
+			state.player.air_jumps -= 1
+			state.player.vel.x = state.player.input_x * MOVE_SPEED
+		}
 		state.player.vel.y = JUMP_SPEED
 		spawn_particles(JUMP_PARTICLE_STRENGTH, quad_ease_out_particle_fn)
 	}
-	if rl.IsKeyDown(rl.KeyboardKey.RIGHT) || rl.IsKeyDown(rl.KeyboardKey.D) do state.player.vel.x += MOVE_SPEED
-	if rl.IsKeyDown(rl.KeyboardKey.LEFT) || rl.IsKeyDown(rl.KeyboardKey.A) do state.player.vel.x -= MOVE_SPEED
+	if (rl.IsKeyReleased(rl.KeyboardKey.W) || rl.IsKeyReleased(rl.KeyboardKey.UP)) &&
+	   state.player.vel.y < 0 {
+		state.player.vel.y *= JUMP_CUT_FACTOR
+	}
+
 }
 
 draw_player :: proc() {
