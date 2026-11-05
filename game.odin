@@ -39,7 +39,6 @@ Player :: struct {
 	on_ground: bool,
 }
 
-//TODO: particles: jumping: particles poitned upwards (like current implementation) | landing: particles go in a curve, raise briefly then drop
 
 Particle_Ring_Buffer :: struct {
 	particles: [MAX_PARTICLES]Particle,
@@ -116,7 +115,6 @@ update_player :: proc(dt: f32) {
 }
 
 spawn_jump_particles :: proc(strength: f32) {
-	//todo: dont have them only go angled up, some down is also ok
 	particle_count := int(4 + 8 * strength)
 	for i in 0 ..< particle_count {
 		dir: f32 = i % 2 == 0 ? -1 : 1
@@ -145,10 +143,15 @@ spawn_jump_particles :: proc(strength: f32) {
 }
 
 linear_particle_fn :: proc(x: f32, pos: rl.Vector2, invert: bool) -> rl.Vector2 {
-	return {invert ? -1 : 1, -1}
+	// outward and up, easing out (replaces the old global drag)
+	decay := (1 - x) * (1 - x)
+	return rl.Vector2{invert ? -1 : 1, -1} * decay
 }
 
 arc_particle_fn :: proc(x: f32, pos: rl.Vector2, invert: bool) -> rl.Vector2 {
+	// vertical velocity grows linearly (like gravity) -> parabolic path.
+	// height offset ∝ -1.5x + 2x²: peaks at x = 0.375, back at start height
+	// at x = 0.75, then keeps falling below it
 	return {invert ? -1 : 1, -1.5 + 4 * x}
 }
 
@@ -211,10 +214,10 @@ update_particles :: proc(dt: f32) {
 		if p.dir == nil do continue
 
 		x := 1 - p.lifetime / p.max_lifetime
-		dir := rl.Vector2Normalize(p.dir(x, p.pos, p.invert))
-
-		p.speed *= math.pow(0.02, dt) // drag
-		p.pos += dir * p.speed * dt
+		// dir returns a velocity multiplier, so the function controls both
+		// direction and pacing (easing, falling faster, ...)
+		vel := p.dir(x, p.pos, p.invert)
+		p.pos += vel * p.speed * dt
 	}
 }
 
@@ -223,12 +226,11 @@ draw_particles :: proc() {
 		if !p.active do continue
 
 		t := p.lifetime / p.max_lifetime
-		size := p.size * (1.5 - t)
 		alpha := u8(180 * t * t)
 
-		draw_pos := rl.Vector2{p.pos.x - size.x / 2, p.pos.y - size.y / 2}
+		draw_pos := rl.Vector2{p.pos.x - p.size.x / 2, p.pos.y - p.size.y / 2}
 
-		rl.DrawRectangleV(draw_pos, size, rl.Color{237, 169, 66, 255})
+		rl.DrawRectangleV(draw_pos, p.size, rl.Color{237, 169, 66, alpha})
 	}
 }
 
