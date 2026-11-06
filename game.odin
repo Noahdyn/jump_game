@@ -12,11 +12,14 @@ PLAYER_HEIGHT :: 32
 
 GROUND_LEVEL :: GAME_HEIGHT * 0.66
 
+// Keep obstacle edges on whole pixels (750 * 0.75 = 562.5 would put them on half pixels).
+OBSTACLE_X :: GAME_WIDTH * 3 / 4
+
 GRAVITY :: 1800
 
 JUMP_CUT_FACTOR :: 0.5
 
-MOVE_SPEED :: 240
+MOVE_SPEED :: 440
 JUMP_SPEED :: -866
 
 
@@ -29,29 +32,40 @@ JUMP_STRETCH_FACTOR :: 0.35
 JUMP_STRETCH_ANIM_DURATION :: .2
 STRETCH_SMOOTHING :: 20
 
-SQUASH_SMOOTHING :: 4
+SQUASH_SMOOTHING :: 8
 SQUASH_FACTOR: f32 : 0.55
 SQUASH_THRESHOLD :: 360
+
+SIZE_SNAP_EPSILON :: 0.25
 
 JUMP_PARTICLE_STRENGTH :: 0.2
 LANDING_PARTICLE_STRENGTH :: 0.4
 
 MAX_PARTICLES :: 256
 
+MAX_OBSTACLES :: 256
+
 Game_State :: struct {
 	player:               Player,
 	particle_ring_buffer: Particle_Ring_Buffer,
+	obstacles:            [MAX_OBSTACLES]Obstacle,
+	obstacle_count:       u16,
 }
 
 Player :: struct {
-	pos:       rl.Vector2,
-	size:      rl.Vector2,
-	vel:       rl.Vector2,
-	on_ground: bool,
-	air_jumps: u8,
-	input_x:   f32,
+	pos:           rl.Vector2,
+	size:          rl.Vector2,
+	vel:           rl.Vector2,
+	on_ground:     bool,
+	air_jumps:     u8,
+	input_x:       f32,
+	collision_box: rl.Rectangle,
 }
 
+Obstacle :: struct {
+	pos:  rl.Vector2,
+	size: rl.Vector2,
+}
 
 Particle_Ring_Buffer :: struct {
 	particles: [MAX_PARTICLES]Particle,
@@ -70,6 +84,9 @@ Particle :: struct {
 	active:       bool,
 }
 
+Collision_Result :: struct {
+	hit_ceiling, hit_wall, hit_floor: bool,
+}
 
 state: Game_State
 
@@ -78,6 +95,19 @@ main :: proc() {
 		pos  = {GAME_WIDTH / 2, 100},
 		size = {PLAYER_WIDTH, PLAYER_HEIGHT},
 	}
+
+	state.obstacles[state.obstacle_count] = Obstacle {
+		size = {30, 50},
+		pos  = {OBSTACLE_X, GROUND_LEVEL},
+	}
+	state.obstacle_count += 1
+
+	state.obstacles[state.obstacle_count] = Obstacle {
+		size = {100000, GAME_HEIGHT - GROUND_LEVEL},
+		pos  = {OBSTACLE_X, GAME_HEIGHT},
+	}
+	state.obstacle_count += 1
+
 	rl.InitWindow(750, 750, "Jump Game")
 	rl.SetTargetFPS(60)
 
@@ -90,7 +120,7 @@ main :: proc() {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.RAYWHITE)
 		draw_player()
-		draw_ground()
+		draw_obstacles()
 		draw_particles()
 		rl.EndDrawing()
 	}
@@ -100,12 +130,19 @@ update_player :: proc(dt: f32) {
 	p := &state.player
 	p.vel.y += GRAVITY * dt
 
-	speed := min(abs(p.vel.y) / abs(f32(JUMP_SPEED)), 1)
-	stretch := speed * JUMP_STRETCH_FACTOR
+	stretch: f32 = 0
+	if !p.on_ground {
+		speed := min(abs(p.vel.y) / abs(f32(JUMP_SPEED)), 1)
+		stretch = speed * JUMP_STRETCH_FACTOR
+	}
 
 	target_size := rl.Vector2{PLAYER_WIDTH * (1 - stretch), PLAYER_HEIGHT * (1 + stretch)}
 	t := min(dt * (p.on_ground ? SQUASH_SMOOTHING : STRETCH_SMOOTHING), 1)
 	p.size += (target_size - p.size) * t
+	if abs(p.size.x - target_size.x) < SIZE_SNAP_EPSILON &&
+	   abs(p.size.y - target_size.y) < SIZE_SNAP_EPSILON {
+		p.size = target_size
+	}
 
 	target := p.input_x * MOVE_SPEED
 	accel: f32
@@ -116,14 +153,12 @@ update_player :: proc(dt: f32) {
 	}
 	p.vel.x = move_toward(p.vel.x, target, accel * dt)
 
-	p.pos += p.vel * dt
+	collision := move_and_collide(&p.pos, &p.vel, {PLAYER_WIDTH, PLAYER_HEIGHT}, dt)
 
-	p.on_ground = p.pos.y >= GROUND_LEVEL
+	p.on_ground = collision.hit_floor
 
 	if p.on_ground {
-		p.pos.y = GROUND_LEVEL
 		p.air_jumps = 1
-
 		if p.vel.y > SQUASH_THRESHOLD {
 			spawn_particles(LANDING_PARTICLE_STRENGTH, arc_particle_fn)
 			squash := SQUASH_FACTOR
@@ -136,6 +171,41 @@ update_player :: proc(dt: f32) {
 move_toward :: proc(current, target, max_delta: f32) -> f32 {
 	if abs(target - current) <= max_delta do return target
 	return current + math.sign(target - current) * max_delta
+}
+
+move_and_collide :: proc(
+	pos, vel: ^rl.Vector2,
+	size: rl.Vector2,
+	dt: f32,
+) -> (
+	res: Collision_Result,
+) {
+	solids := state.obstacles[:state.obstacle_count]
+
+	pos.x += vel.x * dt
+	for o in solids {
+		ob := aabb(o.pos, o.size)
+		if !rl.CheckCollisionRecs(aabb(pos^, size), ob) do continue
+		if vel.x > 0 do pos.x = ob.x - size.x / 2
+		else do pos.x = ob.x + ob.width + size.x / 2
+		vel.x = 0
+		res.hit_wall = true
+	}
+
+	pos.y += vel.y * dt
+	for o in solids {
+		ob := aabb(o.pos, o.size)
+		if !rl.CheckCollisionRecs(aabb(pos^, size), ob) do continue
+		if vel.y >
+		   0 {pos.y = ob.y;res.hit_floor = true} else {pos.y = ob.y + ob.height + size.y;res.hit_ceiling = true}
+		//doesnt set vel.y 0 cause ground handling does that
+	}
+	return
+}
+
+
+aabb :: proc(pos, size: rl.Vector2) -> rl.Rectangle {
+	return {pos.x - size.x / 2, pos.y - size.y, size.x, size.y}
 }
 
 spawn_particles :: proc(
@@ -199,11 +269,15 @@ handle_input :: proc() {
 }
 
 draw_player :: proc() {
-	draw_pos := rl.Vector2 {
-		state.player.pos.x - state.player.size.x / 2,
-		state.player.pos.y - state.player.size.y,
-	}
-	rl.DrawRectangleV(draw_pos, state.player.size, rl.BLACK)
+	p := state.player
+	draw_rect_snapped(p.pos.x - p.size.x / 2, p.pos.y - p.size.y, p.size, rl.BLACK)
+}
+
+// Rounds each edge to the nearest pixel so sub-pixel gaps look the same on both sides.
+draw_rect_snapped :: proc(x, y: f32, size: rl.Vector2, color: rl.Color) {
+	left, top := math.round(x), math.round(y)
+	right, bottom := math.round(x + size.x), math.round(y + size.y)
+	rl.DrawRectangleV({left, top}, {right - left, bottom - top}, color)
 }
 
 update_particles :: proc(dt: f32) {
@@ -237,6 +311,9 @@ draw_particles :: proc() {
 	}
 }
 
-draw_ground :: proc() {
-	rl.DrawLineEx({0, GROUND_LEVEL}, {GAME_WIDTH, GROUND_LEVEL}, 3, rl.BLACK)
+draw_obstacles :: proc() {
+	for i in 0 ..< state.obstacle_count {
+		o := state.obstacles[i]
+		draw_rect_snapped(o.pos.x - o.size.x / 2, o.pos.y - o.size.y, o.size, rl.RED)
+	}
 }
