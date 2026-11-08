@@ -45,11 +45,15 @@ MAX_PARTICLES :: 256
 
 MAX_OBSTACLES :: 256
 
+MAX_IMPACT_SPEED :: 1200
+
+
 Game_State :: struct {
 	player:               Player,
 	particle_ring_buffer: Particle_Ring_Buffer,
 	obstacles:            [MAX_OBSTACLES]Obstacle,
 	obstacle_count:       u16,
+	camera:               rl.Camera2D,
 }
 
 Player :: struct {
@@ -63,8 +67,9 @@ Player :: struct {
 }
 
 Obstacle :: struct {
-	pos:  rl.Vector2,
-	size: rl.Vector2,
+	pos:   rl.Vector2,
+	size:  rl.Vector2,
+	color: rl.Color,
 }
 
 Particle_Ring_Buffer :: struct {
@@ -97,31 +102,48 @@ main :: proc() {
 	}
 
 	state.obstacles[state.obstacle_count] = Obstacle {
-		size = {30, 50},
-		pos  = {OBSTACLE_X, GROUND_LEVEL},
+		size  = {30, 50},
+		pos   = {OBSTACLE_X, GROUND_LEVEL},
+		color = rl.RED,
 	}
 	state.obstacle_count += 1
 
 	state.obstacles[state.obstacle_count] = Obstacle {
-		size = {100000, GAME_HEIGHT - GROUND_LEVEL},
-		pos  = {OBSTACLE_X, GAME_HEIGHT},
+		size  = {100000, GAME_HEIGHT - GROUND_LEVEL},
+		pos   = {OBSTACLE_X, GAME_HEIGHT},
+		color = rl.DARKGRAY,
 	}
 	state.obstacle_count += 1
 
-	rl.InitWindow(750, 750, "Jump Game")
+	state.camera = rl.Camera2D{}
+	state.camera.target = state.player.pos - {0, state.player.size.y + GAME_HEIGHT * 0.15}
+	state.camera.offset = {GAME_WIDTH / 2, GAME_HEIGHT / 2}
+	state.camera.zoom = 1.0
+	state.camera.rotation = 0.0
+
+	rl.InitWindow(GAME_WIDTH, GAME_HEIGHT, "Jump Game")
+	defer rl.CloseWindow()
 	rl.SetTargetFPS(60)
 
 	dt: f32
 	for !rl.WindowShouldClose() {
 		dt = rl.GetFrameTime()
+		camera_speed := dt * 5.0
+		state.camera.target.x += (state.player.pos.x - state.camera.target.x) * camera_speed
+		state.camera.target.y +=
+			((state.player.pos.y - (state.player.size.y + GAME_HEIGHT * 0.15)) -
+				state.camera.target.y) *
+			camera_speed
 		handle_input()
 		update_player(dt)
 		update_particles(dt)
 		rl.BeginDrawing()
+		rl.BeginMode2D(state.camera)
 		rl.ClearBackground(rl.RAYWHITE)
 		draw_player()
 		draw_obstacles()
 		draw_particles()
+		rl.EndMode2D()
 		rl.EndDrawing()
 	}
 }
@@ -160,7 +182,7 @@ update_player :: proc(dt: f32) {
 	if p.on_ground {
 		p.air_jumps = 1
 		if p.vel.y > SQUASH_THRESHOLD {
-			spawn_particles(LANDING_PARTICLE_STRENGTH, arc_particle_fn)
+			spawn_particles(impact_strength(p.vel.y), arc_particle_fn)
 			squash := SQUASH_FACTOR
 			p.size = {PLAYER_WIDTH * (1 + squash), PLAYER_HEIGHT * (1 - squash)}
 		}
@@ -203,6 +225,10 @@ move_and_collide :: proc(
 	return
 }
 
+impact_strength :: proc(vel_y: f32) -> f32 {
+	t := (vel_y - SQUASH_THRESHOLD) / (MAX_IMPACT_SPEED - SQUASH_THRESHOLD)
+	return clamp(t, 0, 1)
+}
 
 aabb :: proc(pos, size: rl.Vector2) -> rl.Rectangle {
 	return {pos.x - size.x / 2, pos.y - size.y, size.x, size.y}
@@ -270,15 +296,10 @@ handle_input :: proc() {
 
 draw_player :: proc() {
 	p := state.player
-	draw_rect_snapped(p.pos.x - p.size.x / 2, p.pos.y - p.size.y, p.size, rl.BLACK)
+	draw_pos := rl.Vector2{p.pos.x - p.size.x / 2, p.pos.y - p.size.y}
+	rl.DrawRectangleV(draw_pos, p.size, rl.BLACK)
 }
 
-// Rounds each edge to the nearest pixel so sub-pixel gaps look the same on both sides.
-draw_rect_snapped :: proc(x, y: f32, size: rl.Vector2, color: rl.Color) {
-	left, top := math.round(x), math.round(y)
-	right, bottom := math.round(x + size.x), math.round(y + size.y)
-	rl.DrawRectangleV({left, top}, {right - left, bottom - top}, color)
-}
 
 update_particles :: proc(dt: f32) {
 	for &p in state.particle_ring_buffer.particles {
@@ -314,6 +335,7 @@ draw_particles :: proc() {
 draw_obstacles :: proc() {
 	for i in 0 ..< state.obstacle_count {
 		o := state.obstacles[i]
-		draw_rect_snapped(o.pos.x - o.size.x / 2, o.pos.y - o.size.y, o.size, rl.RED)
+		draw_pos := rl.Vector2{o.pos.x - o.size.x / 2, o.pos.y - o.size.y}
+		rl.DrawRectangleV(draw_pos, o.size, o.color)
 	}
 }
